@@ -10,10 +10,27 @@ let gameState = {
   currentQuestion: 0,
   reviewed: new Set(),
   audioCache: {},   // key `${suspectId}:${qIndex}` -> object URL of voiced audio
+  caseFile: null,   // { bodyLocation, evidence, questions } the player is allowed to see
+  finalQuestionUsed: false,  // the one-time "ask all suspects" question
 };
 
 // ============================================================
-//   BOOT — called on page load
+//   MAIN MENU — START CASE
+// ============================================================
+
+// Called when the player clicks "START CASE" on the main menu.
+function beginCase() {
+  const btn = document.getElementById('menu-start-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ OPENING CASE...'; }
+
+  const overlay = document.getElementById('menu-overlay');
+  if (overlay) overlay.classList.add('hidden');
+
+  startGame();
+}
+
+// ============================================================
+//   BOOT — loads the case tapes
 // ============================================================
 
 async function startGame() {
@@ -28,7 +45,9 @@ async function startGame() {
     gameState.sessionId = data.sessionId;
     gameState.tapes     = data.tapes;
     gameState.suspects  = data.suspects;
+    gameState.caseFile  = data.caseFile || null;
 
+    populateCaseFile();
     renderSidebar();
     selectSuspect(data.suspects[0].id);
     showLoading(false);
@@ -48,6 +67,10 @@ async function startGame() {
 function renderSidebar() {
   const sidebar = document.getElementById('suspect-sidebar');
   sidebar.innerHTML = '<div class="sidebar-label">SUSPECTS</div>';
+
+  // Keep the "reviewed / total" denominator in sync with the real suspect count
+  const totalEl = document.getElementById('reviewed-total');
+  if (totalEl) totalEl.textContent = gameState.suspects.length;
 
   gameState.suspects.forEach(suspect => {
     const item = document.createElement('div');
@@ -171,37 +194,158 @@ function markReviewed(suspectId) {
 
   document.getElementById('reviewed-count').textContent = gameState.reviewed.size;
 
-  // Unlock accusation button once all suspects reviewed
+  // Unlock accusation + final-question buttons once all suspects reviewed
   if (gameState.reviewed.size >= gameState.suspects.length) {
     document.getElementById('accuse-btn').disabled = false;
     document.getElementById('accuse-ready').textContent = 'YES';
     document.getElementById('accuse-ready').style.color = '#cc4444';
+
+    const fqBtn = document.getElementById('final-q-btn');
+    if (fqBtn && !gameState.finalQuestionUsed) fqBtn.disabled = false;
   }
+}
+
+// ============================================================
+//   CASE FILE
+// ============================================================
+
+// Fill the case-file modal with this case's body location + evidence clue.
+function populateCaseFile() {
+  const cf = gameState.caseFile;
+  const bodyEl = document.getElementById('casefile-body');
+  const evEl   = document.getElementById('casefile-evidence');
+  if (!cf) return;
+  if (bodyEl) bodyEl.textContent = cf.bodyLocation || 'Unknown';
+  if (evEl)   evEl.textContent   = cf.evidence || 'No evidence logged.';
+}
+
+function openCaseFile() {
+  const overlay = document.getElementById('casefile-overlay');
+  if (overlay) overlay.hidden = false;
+}
+
+function closeCaseFile() {
+  const overlay = document.getElementById('casefile-overlay');
+  if (overlay) overlay.hidden = true;
+}
+
+// ============================================================
+//   FINAL QUESTION (one-time, asked to every suspect)
+// ============================================================
+
+function openFinalQuestion() {
+  if (gameState.finalQuestionUsed) return;
+  document.getElementById('finalq-ask').hidden = false;
+  document.getElementById('finalq-results').hidden = true;
+  document.getElementById('finalq-input').value = '';
+  document.getElementById('finalq-overlay').hidden = false;
+}
+
+function closeFinalQuestion() {
+  document.getElementById('finalq-overlay').hidden = true;
+}
+
+async function sendFinalQuestion() {
+  const input = document.getElementById('finalq-input');
+  const question = input.value.trim();
+  if (!question) { input.focus(); return; }
+
+  const sendBtn = document.getElementById('finalq-send-btn');
+  sendBtn.disabled = true;
+  sendBtn.textContent = '⏳ ASKING...';
+
+  try {
+    const res = await fetch('/api/final-question', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: gameState.sessionId, question })
+    });
+
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || `Request failed (${res.status})`);
+
+    // Consume the one-time question
+    gameState.finalQuestionUsed = true;
+    const fqBtn = document.getElementById('final-q-btn');
+    if (fqBtn) { fqBtn.disabled = true; fqBtn.textContent = '❓ FINAL Q USED'; }
+
+    renderFinalAnswers(data);
+
+  } catch (err) {
+    console.error('[ERROR] sendFinalQuestion:', err.message);
+    alert(err.message || 'Failed to ask the question.');
+    sendBtn.disabled = false;
+    sendBtn.textContent = 'ASK ALL ▶';
+  }
+}
+
+function renderFinalAnswers(data) {
+  document.getElementById('finalq-asked').textContent = `“${data.question}”`;
+
+  const wrap = document.getElementById('finalq-answers');
+  wrap.innerHTML = '';
+
+  gameState.suspects.forEach(s => {
+    const entry = data.answers[s.id];
+    if (!entry) return;
+    const card = document.createElement('div');
+    card.className = 'finalq-answer';
+    card.innerHTML = `
+      <div class="finalq-answer-name">${entry.suspectName} <span class="finalq-answer-role">${entry.suspectRole}</span></div>
+      <div class="finalq-answer-text">${entry.answer}</div>
+    `;
+    wrap.appendChild(card);
+  });
+
+  document.getElementById('finalq-ask').hidden = true;
+  document.getElementById('finalq-results').hidden = false;
 }
 
 // ============================================================
 //   ACCUSATION
 // ============================================================
 
+let selectedAccusedId = null;
+
+// Open the in-page accusation modal and render the suspect choices
 function makeAccusation() {
-  const suspectList = gameState.suspects
-    .map(s => `${s.id}: ${s.name}`)
-    .join('\n');
+  selectedAccusedId = null;
 
-  const input = prompt(
-    `Who do you accuse of murdering Reginald Ashworth?\n\nEnter the number:\n${
-      gameState.suspects.map((s, i) => `${i + 1}. ${s.name}`).join('\n')
-    }`
-  );
+  const list = document.getElementById('accuse-suspect-list');
+  list.innerHTML = '';
 
-  const index = parseInt(input) - 1;
-  if (isNaN(index) || index < 0 || index >= gameState.suspects.length) {
-    alert('Invalid selection.');
-    return;
-  }
+  gameState.suspects.forEach(s => {
+    const card = document.createElement('div');
+    card.className = 'accuse-choice';
+    card.dataset.id = s.id;
+    card.onclick = () => selectAccused(s.id);
+    card.innerHTML = `
+      <div class="accuse-choice-name">${s.name}</div>
+      <div class="accuse-choice-role">${s.occupation}</div>
+    `;
+    list.appendChild(card);
+  });
 
-  const accusedId = gameState.suspects[index].id;
-  submitAccusation(accusedId);
+  document.getElementById('confirm-accuse-btn').disabled = true;
+  document.getElementById('accuse-overlay').hidden = false;
+}
+
+function selectAccused(id) {
+  selectedAccusedId = id;
+  document.querySelectorAll('.accuse-choice').forEach(el => {
+    el.classList.toggle('selected', el.dataset.id === id);
+  });
+  document.getElementById('confirm-accuse-btn').disabled = false;
+}
+
+function closeAccuseModal() {
+  document.getElementById('accuse-overlay').hidden = true;
+}
+
+function confirmAccusation() {
+  if (!selectedAccusedId) return;
+  closeAccuseModal();
+  submitAccusation(selectedAccusedId);
 }
 
 async function submitAccusation(accusedId) {
@@ -220,16 +364,27 @@ async function submitAccusation(accusedId) {
 
   } catch (err) {
     console.error('[ERROR] submitAccusation:', err.message);
-    alert('Failed to submit accusation. Please try again.');
+    showResult({ correct: false, message: 'Failed to submit accusation. Please try again.' });
   }
 }
 
 function showResult(data) {
-  const msg = data.correct
-    ? `✓ CASE CLOSED\n\n${data.message}\n\nYou identified the killer.`
-    : `✗ WRONG ACCUSATION\n\n${data.message}\n\nThe case goes cold.`;
+  const overlay = document.getElementById('result-overlay');
+  const modal   = document.getElementById('result-modal');
+  const title   = document.getElementById('result-title');
+  const message = document.getElementById('result-message');
 
-  alert(msg);
+  modal.classList.toggle('correct', !!data.correct);
+  modal.classList.toggle('wrong', !data.correct);
+  title.textContent   = data.correct ? '✓ CASE CLOSED' : '✗ THE CASE GOES COLD';
+  message.textContent = data.message || '';
+
+  overlay.hidden = false;
+}
+
+function restartGame() {
+  sessionStorage.removeItem('doa_notes');
+  location.reload();
 }
 
 // ============================================================
@@ -372,4 +527,5 @@ window.addEventListener('DOMContentLoaded', () => {
   if (audio) audio.addEventListener('ended', () => setPlayButton('play'));
 });
 
-window.addEventListener('DOMContentLoaded', startGame);
+// Game no longer auto-starts — it waits for the player to click "START CASE"
+// on the main menu (see beginCase). The menu is visible on load by default.

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Dead on Arrival — A Murder Mystery Detective Game</title>
+  <title>Missing Staple — A Murder Mystery Detective Game</title>
   <link rel="stylesheet" href="css/game.css" />
 </head>
 <body>
@@ -11,13 +11,47 @@
 <div class="doa-root">
   <div class="scanlines"></div>
 
+  <!-- MAIN MENU / HOW TO PLAY -->
+  <div class="menu-overlay" id="menu-overlay">
+    <div class="menu-screen">
+      <div class="menu-rec">
+        <span class="rec-dot"></span>
+        <span class="rec-label">REC ● CASE #2182</span>
+      </div>
+
+      <h1 class="menu-title">MISSING STAPLE</h1>
+      <div class="menu-subtitle">A MURDER MYSTERY — DETECTIVE TAPE ARCHIVE</div>
+
+      <div class="menu-brief">
+        Larry Misaras, a cashier at Staples, has been found dead after close.
+        Six coworkers. Six alibis. One of them is lying. Review the interrogation
+        tapes, find the contradictions, and name the killer.
+      </div>
+
+      <div class="menu-howto">
+        <div class="menu-howto-title">HOW TO PLAY</div>
+        <ol class="menu-steps">
+          <li><b>Review the tapes.</b> Select each suspect and step through their 5 answers. Hit <b>▶ PLAY</b> to hear them speak.</li>
+          <li><b>Open the CASE FILE.</b> It shows where the body was found and the key piece of evidence at the scene.</li>
+          <li><b>Cross-reference.</b> Use the <b>notepad</b> to track stories — innocents corroborate each other, the killer slips up.</li>
+          <li><b>One final question.</b> Once every tape is reviewed, you may ask all suspects <b>ONE</b> last question.</li>
+          <li><b>Make your accusation.</b> Choose carefully — once you accuse, the case is closed for good.</li>
+        </ol>
+      </div>
+
+      <button class="menu-start-btn" id="menu-start-btn" onclick="beginCase()">▶ START CASE</button>
+      <div class="menu-foot">EVIDENCE ARCHIVE — PLAYBACK MODE</div>
+    </div>
+  </div>
+
   <div class="top-bar">
     <div class="rec-pill">
       <span class="rec-dot"></span>
       <span class="rec-label">PLAYBACK MODE</span>
     </div>
-    <div class="case-label">EVIDENCE ARCHIVE — CASE #0001</div>
-    <div class="date-label" id="game-date">OCT 14, 19██</div>
+    <div class="case-label">EVIDENCE ARCHIVE — CASE #2182</div>
+    <button class="case-file-btn" id="case-file-btn" onclick="openCaseFile()">📁 CASE FILE</button>
+    <div class="date-label" id="game-date">OCT 14, 20██</div>
   </div>
 
   <div class="main-area">
@@ -50,6 +84,7 @@
         </div>
         <span class="time-label" id="q-counter">Q 1 / 5</span>
         <button class="ctrl-btn" onclick="ejectTape()">⏏ EJECT</button>
+        <button class="ctrl-btn" id="music-toggle" onclick="toggleMusic()">🔊 MUSIC</button>
       </div>
 
       <div class="question-nav" id="question-nav">
@@ -75,17 +110,107 @@
 
   <div class="bottom-bar">
     <div class="progress-label">
-      TAPES REVIEWED: <span id="reviewed-count">0</span> / 5 &nbsp;|&nbsp;
+      TAPES REVIEWED: <span id="reviewed-count">0</span> / <span id="reviewed-total">5</span> &nbsp;|&nbsp;
       READY TO ACCUSE: <span id="accuse-ready">NO</span>
     </div>
+    <button class="final-q-btn" id="final-q-btn" disabled onclick="openFinalQuestion()">
+      ❓ FINAL QUESTION
+    </button>
     <button class="accuse-btn" id="accuse-btn" disabled onclick="makeAccusation()">
       ⚑ MAKE ACCUSATION
     </button>
+  </div>
+
+  <!-- CASE FILE MODAL -->
+  <div class="casefile-overlay" id="casefile-overlay" hidden>
+    <div class="casefile-modal">
+      <div class="casefile-header">📁 CASE FILE — #2182</div>
+      <div class="casefile-stamp">CONFIDENTIAL</div>
+
+      <div class="casefile-section">
+        <div class="casefile-label">VICTIM</div>
+        <div class="casefile-value">Larry Misaras — Cashier</div>
+      </div>
+
+      <div class="casefile-section">
+        <div class="casefile-label">BODY FOUND IN</div>
+        <div class="casefile-value casefile-room" id="casefile-body">— — —</div>
+      </div>
+
+      <div class="casefile-section">
+        <div class="casefile-label">EVIDENCE AT THE SCENE</div>
+        <div class="casefile-value casefile-evidence" id="casefile-evidence">— — —</div>
+      </div>
+
+      <div class="casefile-hint">
+        Cross-reference the tapes against this evidence. The truth is in the contradictions.
+      </div>
+
+      <div class="casefile-actions">
+        <button class="ctrl-btn" onclick="closeCaseFile()">◀ CLOSE FILE</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- FINAL QUESTION MODAL -->
+  <div class="finalq-overlay" id="finalq-overlay" hidden>
+    <div class="finalq-modal">
+      <div class="finalq-header">❓ ONE FINAL QUESTION</div>
+      <div class="finalq-sub">You get to ask every suspect ONE last question. Use it wisely — you only get one.</div>
+
+      <div class="finalq-ask" id="finalq-ask">
+        <textarea
+          class="finalq-input"
+          id="finalq-input"
+          rows="3"
+          placeholder="e.g. Who did you see near Aisle 5 after closing?"
+        ></textarea>
+        <div class="finalq-actions">
+          <button class="ctrl-btn" onclick="closeFinalQuestion()">◀ CANCEL</button>
+          <button class="accuse-btn" id="finalq-send-btn" onclick="sendFinalQuestion()">ASK ALL ▶</button>
+        </div>
+      </div>
+
+      <div class="finalq-results" id="finalq-results" hidden>
+        <div class="finalq-asked" id="finalq-asked"></div>
+        <div class="finalq-answers" id="finalq-answers"></div>
+        <div class="finalq-actions">
+          <button class="ctrl-btn" onclick="closeFinalQuestion()">◀ CLOSE</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ACCUSATION MODAL -->
+  <div class="accuse-overlay" id="accuse-overlay" hidden>
+    <div class="accuse-modal">
+      <div class="accuse-modal-header">⚑ NAME YOUR KILLER</div>
+      <div class="accuse-modal-sub">Once you accuse, the case is closed. Choose carefully.</div>
+      <div class="accuse-suspect-list" id="accuse-suspect-list"></div>
+      <div class="accuse-modal-actions">
+        <button class="ctrl-btn" onclick="closeAccuseModal()">◀ CANCEL</button>
+        <button class="accuse-btn" id="confirm-accuse-btn" disabled onclick="confirmAccusation()">⚑ ACCUSE</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RESULT MODAL -->
+  <div class="result-overlay" id="result-overlay" hidden>
+    <div class="result-modal" id="result-modal">
+      <div class="result-title" id="result-title"></div>
+      <div class="result-message" id="result-message"></div>
+      <button class="accuse-btn" onclick="restartGame()">⟲ NEW CASE</button>
+    </div>
   </div>
 </div>
 
 <audio id="tape-audio" preload="none"></audio>
 
+<!-- Hidden YouTube player for ambient background music (offscreen, not display:none so it can play) -->
+<div id="yt-music" style="position:fixed;left:-9999px;top:0;width:320px;height:180px;" aria-hidden="true"></div>
+
 <script src="js/game.js"></script>
+<script src="js/music.js"></script>
+<script src="https://www.youtube.com/iframe_api"></script>
 </body>
 </html>

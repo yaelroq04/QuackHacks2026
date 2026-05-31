@@ -28,12 +28,12 @@ const TTS_MODEL = 'eleven_v3'; // most expressive model — supports [audio tags
 const DEFAULT_VOICE = '21m00Tcm4TlvDq8ikWAM'; // "Rachel" — a public ElevenLabs voice used as a fallback
 
 const VOICES = {
-  suspect_1: 'VOICE_ID_BILL',       // Bill Keady
-  suspect_2: 'VOICE_ID_STEPHANIE',  // Stephanie Beinart
-  suspect_3: 'VOICE_ID_CHRIS',      // Chris Yoder
-  suspect_4: 'VOICE_ID_IAN',        // Ian Beard
-  suspect_5: 'VOICE_ID_BEATRIZ',    // Beatriz Arevalo
-  suspect_6: 'VOICE_ID_JACOB'       // Jacob Hurst
+  suspect_1: 'Ybqj6CIlqb6M85s9Bl4n',       // Bill Keady
+  suspect_2: '03vEurziQfq3V8WZhQvn',  // Stephanie Beinart
+  suspect_3: 'YHcCpa6SBWnKDaCPZJQR',      // Chris Yoder
+  suspect_4: 'sjFiQiLHGgEyVwArBT5s',        // Ian Beard
+  suspect_5: 'eppqEXVumQ3CfdndcIBd',    // Beatriz Arevalo
+  suspect_6: 'eadgjmk4R4uojdsheG9t'       // Jacob Hurst
 };
 
 function resolveVoice(suspectId) {
@@ -53,7 +53,19 @@ function toAudioTags(text) {
 //   GAME CONFIG
 // ============================================================
 
-const QUESTIONS = [
+// The rooms in the store where the body could be found and where suspects could be.
+const ROOMS = [
+  "Break Room",
+  "Print Counter",
+  "Entrance Door",
+  "Cash Office",
+  "Bill's Office",
+  "Aisle 5",
+  "Men's Restroom"
+];
+
+// Fallback questions used only if the AI case-truth generation fails.
+const FALLBACK_QUESTIONS = [
   "Where were you between 8pm and 10pm on the night of the incident?",
   "Can you describe your relationship with the victim?",
   "Did you see anyone acting suspiciously that evening?",
@@ -113,25 +125,112 @@ const SUSPECTS = {
 };
 
 // ============================================================
+//   GENERATE THE HIDDEN CASE TRUTH
+// ============================================================
+// One Gemini call invents the ground truth for this specific case:
+//  - which room the body was found in
+//  - what actually happened the night of the murder
+//  - one subtle piece of physical evidence that points to the real killer
+//  - where each suspect ACTUALLY was (their true location)
+//  - 5 fresh interrogation questions
+// The player never sees the killer's identity or the suspects' true locations;
+// they only see the body location + the evidence clue in the CASE FILE.
+// Suspect tapes are then generated FROM this truth so innocents corroborate
+// and the killer's lie clashes with the evidence + the others.
+
+async function generateCaseTruth(killerId) {
+  const killer = SUSPECTS[killerId];
+  const suspectRoster = Object.entries(SUSPECTS)
+    .map(([id, s]) => `- ${id} = ${s.name} (${s.occupation}); default alibi: ${s.alibi}`)
+    .join('\n');
+
+  const prompt = `You are the game master for a Clue-style murder mystery set at a Staples store.
+The victim is Larry Misaras, a long-time cashier — a loud, frequently-absent loose cannon
+that many coworkers resented.
+
+THE ROOMS in the store are exactly: ${ROOMS.join(', ')}.
+
+THE SUSPECTS:
+${suspectRoster}
+
+THE REAL KILLER for THIS case is: ${killerId} (${killer.name}, ${killer.occupation}).
+
+Invent a fresh, self-consistent ground truth for this specific case. Return ONLY valid JSON
+(no markdown, no code fences) with EXACTLY this shape:
+
+{
+  "bodyLocation": "<one of the rooms above — where Larry's body was found>",
+  "summary": "<2-3 sentence description of what really happened the night of the murder, consistent with the killer being ${killer.name}>",
+  "evidence": "<ONE subtle piece of physical evidence found at/near the body that quietly points to the killer WITHOUT naming them — e.g. a smudge of toner, a specific item, a sound someone heard. It should be a clue a sharp detective could connect to the killer's role/location, never an outright giveaway>",
+  "questions": ["<question 1>", "<question 2>", "<question 3>", "<question 4>", "<question 5>"],
+  "locations": {
+    "suspect_1": "<room this suspect was truly in>",
+    "suspect_2": "<room>",
+    "suspect_3": "<room>",
+    "suspect_4": "<room>",
+    "suspect_5": "<room>",
+    "suspect_6": "<room>"
+  }
+}
+
+RULES:
+- The killer (${killerId}) must truly have been in or near the "bodyLocation" room, OR their true location must conflict with the evidence so a detective can catch them.
+- Innocent suspects' true locations should be consistent with each other so their stories corroborate.
+- At least one innocent suspect's true location should let them corroborate or clear another innocent, and at least one should be able to cast subtle suspicion toward the killer's area.
+- The 5 questions should be natural interrogation questions (about whereabouts that night, the victim, suspicious activity, motive, and daily routine) but freshly worded for this case.
+- Keep the evidence subtle — it hints, it does not announce.
+- Output JSON only.`;
+
+  const response = await ai.models.generateContent({
+    model: MODEL,
+    contents: prompt,
+    config: {
+      maxOutputTokens: 2048,
+      thinkingConfig: { thinkingBudget: 0 },
+      responseMimeType: 'application/json'
+    }
+  });
+
+  const truth = JSON.parse(response.text);
+
+  // Basic validation / normalization with fallbacks
+  if (!Array.isArray(truth.questions) || truth.questions.length < 5) {
+    truth.questions = FALLBACK_QUESTIONS;
+  }
+  truth.questions = truth.questions.slice(0, 5);
+  if (!ROOMS.includes(truth.bodyLocation)) {
+    truth.bodyLocation = ROOMS[Math.floor(Math.random() * ROOMS.length)];
+  }
+  if (!truth.locations || typeof truth.locations !== 'object') truth.locations = {};
+
+  return truth;
+}
+
+// ============================================================
 //   BUILD SYSTEM PROMPT
 // ============================================================
 
-function buildSystemPrompt(suspectId, isKiller) {
+function buildSystemPrompt(suspectId, isKiller, caseTruth) {
   const s = SUSPECTS[suspectId];
+  const trueLocation = caseTruth.locations[suspectId] || s.alibi;
 
   const roleInstruction = isKiller
     ? `YOU ARE THE KILLER. You murdered Larry Misaras.
        You must lie convincingly but subtly. Do NOT confess under any circumstances.
+       Your TRUE location that night was: "${trueLocation}". You will NOT admit this — you
+       will give a false alibi instead, because your true location ties you to the crime.
        Weave in small, detectable inconsistencies — things that a sharp detective
-       cross-referencing your answers with other suspects might catch.
-       For example: claim you were somewhere that another innocent suspect will
-       contradict. Be slightly evasive on the time gap. Show just a flicker of
-       emotion you quickly suppress. Never over-explain. Liars over-explain.`
+       cross-referencing your answers with other suspects (and the evidence) might catch.
+       Claim you were somewhere that an innocent suspect can contradict. Be slightly evasive
+       on the time gap. Show just a flicker of emotion you quickly suppress. Never over-explain.
+       Liars over-explain. Do NOT mention or react to the specific physical evidence directly.`
     : `YOU ARE INNOCENT. You did not kill Larry Misaras.
-       Answer honestly according to your alibi and your genuine feelings.
-       You may be nervous, defensive, or emotional — that fits your personality —
-       but your answers should be internally consistent and not contradict
-       what other innocent people at the event would truthfully say.`;
+       Your TRUE location that night was: "${trueLocation}". Answer honestly about where you
+       were and what you genuinely saw and felt. You may be nervous, defensive, or emotional —
+       that fits your personality — but your account must be truthful and internally consistent,
+       and it must NOT contradict what other honest people would say. If, from your true location,
+       you could have plausibly seen or heard something relevant, share it — it may clear an
+       innocent person or cast suspicion on someone near the scene.`;
 
   return `You are ${s.name}, ${s.occupation}.
 
@@ -139,11 +238,15 @@ PERSONALITY: ${s.personality}
 
 BACKSTORY: ${s.backstory}
 
-YOUR ALIBI FOR THE NIGHT: ${s.alibi}
-
 YOUR RELATIONSHIP WITH THE VICTIM: ${s.relationship_to_victim}
 
-THE SITUATION: Staples is a normal place, or is what it looks like. Office supplies, print services, party supplies for some wild reason. But 
+THE CASE (hidden ground truth for THIS interrogation — stay consistent with it):
+- Larry Misaras's body was found in: ${caseTruth.bodyLocation}
+- What really happened: ${caseTruth.summary}
+- A piece of evidence at the scene: ${caseTruth.evidence}
+- Your TRUE location that night: ${trueLocation}
+
+THE SITUATION: Staples is a normal place, or is what it looks like. Office supplies, print services, party supplies for some wild reason. But
 one of their employees has been murdered! Larry was a cashier, been around for years. Unfortunately, he was a loose cannon, always calling out on shifts, the biggest yapper in the store
 and regardless of his tenure, always seemed to need help. Everyone had a reason to take care of him for good, but so many disgruntled employees
 its hard to know who exactly did it. See if you can get some information out of everyone to solve this mystery for good, otherwise you're fired.
@@ -174,20 +277,36 @@ app.post('/api/start-game', async (req, res) => {
     const suspectIds = Object.keys(SUSPECTS);
     const killerId = suspectIds[Math.floor(Math.random() * suspectIds.length)];
 
-    // Store killer in a simple server-side session (use a real session store in production)
-    // For hackathon purposes we send back a signed token approach —
-    // here we just keep it simple and store in memory keyed by a session ID
+    // Step 1: generate the hidden ground truth for THIS case (fresh every game).
+    // Falls back to default questions/locations if the model output is unusable.
+    let caseTruth;
+    try {
+      caseTruth = await generateCaseTruth(killerId);
+    } catch (truthErr) {
+      console.error('[WARN] case-truth generation failed, using fallback:', truthErr.message);
+      caseTruth = {
+        bodyLocation: ROOMS[Math.floor(Math.random() * ROOMS.length)],
+        summary: 'Larry was found dead after closing. Someone he trusted got him alone.',
+        evidence: 'A faint streak of printer toner was found on the victim\'s sleeve.',
+        questions: FALLBACK_QUESTIONS,
+        locations: {}
+      };
+    }
+
+    const QUESTIONS = caseTruth.questions;
+
+    // Store killer + full case truth in a server-side session (in-memory for hackathon).
     const sessionId = Math.random().toString(36).slice(2);
-    activeSessions[sessionId] = { killerId, startedAt: Date.now() };
+    activeSessions[sessionId] = { killerId, caseTruth, startedAt: Date.now() };
 
-    console.log(`[GAME] New game started. Session: ${sessionId}. Killer: ${killerId}`);
+    console.log(`[GAME] New game started. Session: ${sessionId}. Killer: ${killerId}. Body in: ${caseTruth.bodyLocation}`);
 
-    // Generate all 5 tapes simultaneously
+    // Step 2: generate all suspect tapes simultaneously, grounded in the case truth.
     const questionsText = QUESTIONS.map((q, i) => `Question ${i + 1}: ${q}`).join('\n');
 
     const tapePromises = suspectIds.map(async (suspectId) => {
       const isKiller = suspectId === killerId;
-      const systemPrompt = buildSystemPrompt(suspectId, isKiller);
+      const systemPrompt = buildSystemPrompt(suspectId, isKiller, caseTruth);
 
       const response = await ai.models.generateContent({
         model: MODEL,
@@ -220,7 +339,15 @@ app.post('/api/start-game', async (req, res) => {
       };
     });
 
-    res.json({ sessionId, tapes, suspects: getSuspectProfiles() });
+    // The CASE FILE the player is allowed to see — body location + evidence + questions.
+    // Never includes the killer's identity or the suspects' true locations.
+    const caseFile = {
+      bodyLocation: caseTruth.bodyLocation,
+      evidence: caseTruth.evidence,
+      questions: QUESTIONS
+    };
+
+    res.json({ sessionId, tapes, suspects: getSuspectProfiles(), caseFile });
 
   } catch (err) {
     console.error('[ERROR] /api/start-game:', err.message);
@@ -272,6 +399,70 @@ app.post('/api/tts', async (req, res) => {
   } catch (err) {
     console.error('[ERROR] /api/tts:', err.message);
     res.status(500).json({ error: 'Failed to generate audio.' });
+  }
+});
+
+// Player's ONE final question — broadcast to every suspect, used only once per game.
+// Each suspect answers in-character, grounded in the same hidden case truth, so the
+// killer keeps lying and innocents stay consistent.
+app.post('/api/final-question', async (req, res) => {
+  try {
+    const { sessionId, question } = req.body;
+
+    const session = activeSessions[sessionId];
+    if (!session) {
+      return res.status(400).json({ error: 'Invalid or expired session.' });
+    }
+    if (session.finalQuestionUsed) {
+      return res.status(403).json({ error: 'You have already used your final question.' });
+    }
+    if (!question || !question.trim()) {
+      return res.status(400).json({ error: 'Missing question.' });
+    }
+
+    const cleanQuestion = question.trim().slice(0, 400);
+    const { killerId, caseTruth } = session;
+    const suspectIds = Object.keys(SUSPECTS);
+    const questionText = `Question 1: ${cleanQuestion}`;
+
+    const answerPromises = suspectIds.map(async (suspectId) => {
+      const isKiller = suspectId === killerId;
+      const systemPrompt = buildSystemPrompt(suspectId, isKiller, caseTruth);
+
+      const response = await ai.models.generateContent({
+        model: MODEL,
+        contents: questionText,
+        config: {
+          systemInstruction: systemPrompt,
+          maxOutputTokens: 512,
+          thinkingConfig: { thinkingBudget: 0 }
+        }
+      });
+
+      const answer = parseAnswers(response.text)[0] || 'No response recorded.';
+      return { suspectId, answer };
+    });
+
+    const results = await Promise.all(answerPromises);
+
+    // Mark the one-time question as spent
+    session.finalQuestionUsed = true;
+
+    const answers = {};
+    results.forEach(({ suspectId, answer }) => {
+      answers[suspectId] = {
+        suspectName: SUSPECTS[suspectId].name,
+        suspectRole: SUSPECTS[suspectId].occupation,
+        answer
+      };
+    });
+
+    console.log(`[GAME] Final question used — Session: ${sessionId}. Q: "${cleanQuestion}"`);
+    res.json({ question: cleanQuestion, answers });
+
+  } catch (err) {
+    console.error('[ERROR] /api/final-question:', err.message);
+    res.status(500).json({ error: 'Failed to get answers. Please try again.' });
   }
 });
 
@@ -357,7 +548,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`
   ========================================
-  🔍 Dead on Arrival — Server Running
+  🔍 Missing Staple — Server Running
   ========================================
   Local:   http://localhost:${PORT}
   ========================================
